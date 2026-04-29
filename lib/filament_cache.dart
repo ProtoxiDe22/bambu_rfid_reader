@@ -89,6 +89,26 @@ class FilamentCache {
     return _decode(resp.body);
   }
 
+  static String _normalizeMaterial(String material) {
+    const qualifiers = [
+      'basic', 'matte', 'metal', 'silk', 'sparkle', 'support',
+      'rapid', 'lite', 'tough', 'clear', 'translucent',
+    ];
+    var m = material.trim().toUpperCase();
+    for (final q in qualifiers) {
+      final upper = q.toUpperCase();
+      if (m.endsWith(' $upper')) {
+        m = m.substring(0, m.length - upper.length - 1).trim();
+        break;
+      }
+      if (m.startsWith('$upper ')) {
+        m = m.substring(upper.length + 1).trim();
+        break;
+      }
+    }
+    return m;
+  }
+
   static List<ExternalFilament> _decode(String json) {
     final list = jsonDecode(json) as List<dynamic>;
     return list
@@ -101,12 +121,20 @@ class FilamentCache {
     required String material,
     required double diameterMm,
     required String? colorHex,
+    String? manufacturer,
   }) {
     final diaTarget = double.parse(diameterMm.toStringAsFixed(2));
+    final normalizedMaterial = _normalizeMaterial(material);
 
-    final byMaterial = catalog.where((f) =>
-        f.material.toLowerCase() == material.toLowerCase() &&
+    var byMaterial = catalog.where((f) =>
+        f.material.toLowerCase() == normalizedMaterial.toLowerCase() &&
         (f.diameter - diaTarget).abs() < 0.05);
+
+    if (manufacturer != null && manufacturer.isNotEmpty) {
+      final filtered = byMaterial
+          .where((f) => f.manufacturer.toLowerCase() == manufacturer.toLowerCase());
+      if (filtered.isNotEmpty) byMaterial = filtered;
+    }
 
     if (colorHex == null || colorHex.isEmpty) {
       return byMaterial.isNotEmpty ? byMaterial.first : null;

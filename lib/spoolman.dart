@@ -110,6 +110,8 @@ class SpoolmanClient {
             .toUpperCase()
         : null;
 
+    const manufacturer = 'Bambu Lab';
+
     List<ExternalFilament> catalog;
     try {
       catalog = await FilamentCache.get(baseUrl);
@@ -123,6 +125,7 @@ class SpoolmanClient {
             material: f.filamentType,
             diameterMm: f.diameterMm,
             colorHex: colorHex,
+            manufacturer: manufacturer,
           )
         : null;
 
@@ -139,6 +142,11 @@ class SpoolmanClient {
       }
     }
 
+    final existingId = await _findExistingFilament(f.filamentType, colorHex);
+    if (existingId != null) return existingId;
+
+    final vendorId = await _resolveVendorId(manufacturer);
+
     final payload = <String, dynamic>{
       'name': f.detailedType.isNotEmpty ? f.detailedType : f.filamentType,
       'material': f.filamentType,
@@ -147,6 +155,7 @@ class SpoolmanClient {
       'density': 1.24,
       'settings_extruder_temp': f.hotendMaxTemp,
       'settings_bed_temp': f.bedTemp,
+      'vendor_id': vendorId,
     };
 
     final resp = await _post(_uri('/api/v1/filament'), payload);
@@ -155,6 +164,37 @@ class SpoolmanClient {
           'Create filament failed: HTTP ${resp.statusCode} – ${resp.body}');
     }
     return (jsonDecode(resp.body) as Map<String, dynamic>)['id'] as int;
+  }
+
+  Future<int?> _findExistingFilament(String material, String? colorHex) async {
+    final query = <String, String>{'material': material};
+    if (colorHex != null) query['color_hex'] = colorHex;
+    final resp = await http
+        .get(_uri('/api/v1/filament', query))
+        .timeout(const Duration(seconds: 8));
+    if (resp.statusCode != 200) return null;
+    final body = jsonDecode(resp.body);
+    final items = body is List ? body : (body['items'] as List? ?? []);
+    if (items.isEmpty) return null;
+    return (items.first as Map<String, dynamic>)['id'] as int;
+  }
+
+  Future<int?> _resolveVendorId(String name) async {
+    final resp = await http
+        .get(_uri('/api/v1/vendor', {'name': name}))
+        .timeout(const Duration(seconds: 8));
+    if (resp.statusCode == 200) {
+      final body = jsonDecode(resp.body);
+      final items = body is List ? body : (body['items'] as List? ?? []);
+      if (items.isNotEmpty) {
+        return (items.first as Map<String, dynamic>)['id'] as int;
+      }
+    }
+    final createResp = await _post(_uri('/api/v1/vendor'), {'name': name});
+    if (createResp.statusCode == 200 || createResp.statusCode == 201) {
+      return (jsonDecode(createResp.body) as Map<String, dynamic>)['id'] as int;
+    }
+    return null;
   }
 
   Future<int?> _findFilamentByExternalId(String extId) async {
