@@ -1,6 +1,5 @@
 import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
-import 'bambu_parser.dart';
 
 // HKDF-SHA256 implementation matching processor.py __hkdf_create_key
 // Python: HKDF(SHA256, length=96, salt=key, info=b"RFID-A\0").derive(uid)
@@ -26,8 +25,8 @@ Uint8List hkdfExtract(List<int> salt, List<int> ikm) {
   return _hmacSha256(salt, ikm);
 }
 
-List<Uint8List> deriveKeys(Uint8List uid) {
-  final saltBytes = _hexToBytes(bambuSaltHex);
+List<Uint8List> deriveKeys(Uint8List uid, {required String saltHex}) {
+  final saltBytes = _hexToBytes(saltHex);
   final info = [...'RFID-A'.codeUnits, 0]; // "RFID-A\0"
 
   final prk = hkdfExtract(saltBytes, uid);

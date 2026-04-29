@@ -46,8 +46,6 @@ const int secondColorPos = 16 * 16 + 4;
 
 const int formatColorInfo = 0x0002;
 
-const String bambuSaltHex = '9A759CF2C4F7CAFF222CB9769B41BC96';
-
 // ─── Binary helpers ──────────────────────────────────────────────────────────
 
 String extractString(Uint8List data, int pos, int len) {

@@ -4,6 +4,9 @@ import 'package:nfc_manager/nfc_manager.dart';
 import 'package:nfc_manager/platform_tags.dart';
 import 'bambu_parser.dart';
 import 'hkdf.dart';
+import 'settings.dart';
+import 'settings_page.dart';
+import 'spoolman.dart';
 
 void main() {
   runApp(const BambuRfidApp());
@@ -65,11 +68,25 @@ class _ScanPageState extends State<ScanPage> {
   BambuFilament? _result;
   final List<LogEntry> _logs = [];
   final ScrollController _logScroll = ScrollController();
+  late AppSettings _settings;
+  bool _settingsLoaded = false;
+  bool _uploading = false;
+  String? _uploadStatus;
+  bool _uploadOk = false;
 
   @override
   void initState() {
     super.initState();
+    _loadSettings();
     _checkNfc();
+  }
+
+  Future<void> _loadSettings() async {
+    final s = await AppSettings.load();
+    setState(() {
+      _settings = s;
+      _settingsLoaded = true;
+    });
   }
 
   void _log(String msg, [LogLevel level = LogLevel.info]) {
@@ -133,7 +150,7 @@ class _ScanPageState extends State<ScanPage> {
 
     List<Uint8List> derivedKeys;
     try {
-      derivedKeys = deriveKeys(Uint8List.fromList(uidBytes));
+      derivedKeys = deriveKeys(Uint8List.fromList(uidBytes), saltHex: _settings.saltHex);
       _log('HKDF key derivation OK.', LogLevel.ok);
     } catch (e) {
       _log('HKDF failed: $e', LogLevel.error);
@@ -191,15 +208,69 @@ class _ScanPageState extends State<ScanPage> {
 
     try {
       final filament = parseBambuTag(allData, tagUid: uidHex);
-      setState(() => _result = filament);
+      setState(() {
+        _result = filament;
+        _uploadStatus = null;
+      });
       _log('Parsed: ${filament.filamentType} / ${filament.detailedType} ${filament.weightGrams}g', LogLevel.ok);
     } catch (e) {
       _log('Parse error: $e', LogLevel.error);
     }
   }
 
+  Future<void> _uploadToSpoolman() async {
+    final f = _result;
+    if (f == null) return;
+    if (!_settings.isConfigured) {
+      setState(() { _uploadStatus = 'Configure Spoolman URL and Salt in Settings first.'; _uploadOk = false; });
+      return;
+    }
+
+    setState(() { _uploading = true; _uploadStatus = null; });
+    final client = SpoolmanClient(_settings.baseUrl);
+
+    try {
+      final existing = await client.findByTrayUid(f.trayUidHex);
+
+      if (existing != null) {
+        setState(() {
+          _uploadOk = false;
+          _uploadStatus = 'Spool already exists in Spoolman (ID #${existing.id}: ${existing.filamentName}).';
+        });
+        return;
+      }
+
+      final spool = await client.createSpool(f);
+      setState(() {
+        _uploadOk = true;
+        _uploadStatus = '✓ Uploaded as Spoolman spool #${spool.id}.';
+      });
+    } catch (e) {
+      setState(() {
+        _uploadOk = false;
+        _uploadStatus = 'Upload failed: $e';
+      });
+    } finally {
+      setState(() => _uploading = false);
+    }
+  }
+
+  Future<void> _openSettings() async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => SettingsPage(settings: _settings)),
+    );
+    setState(() {});
+  }
+
   @override
   Widget build(BuildContext context) {
+    if (!_settingsLoaded) {
+      return const Scaffold(
+        backgroundColor: Color(0xFF0F1117),
+        body: Center(child: CircularProgressIndicator()),
+      );
+    }
     return Scaffold(
       body: SafeArea(
         child: ListView(
@@ -212,6 +283,8 @@ class _ScanPageState extends State<ScanPage> {
             _buildLogCard(),
             if (_result != null) ...[
               const SizedBox(height: 12),
+              _buildUploadCard(_result!),
+              const SizedBox(height: 12),
               _buildResultCard(_result!),
             ],
           ],
@@ -221,21 +294,87 @@ class _ScanPageState extends State<ScanPage> {
   }
 
   Widget _buildHeader() {
-    return Column(
+    return Stack(
+      alignment: Alignment.center,
       children: [
-        const Text('🧵', style: TextStyle(fontSize: 40)),
-        const SizedBox(height: 8),
-        const Text(
-          'Bambu RFID Reader',
-          style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700, color: Colors.white),
+        Column(
+          children: [
+            const Text('🧵', style: TextStyle(fontSize: 40)),
+            const SizedBox(height: 8),
+            const Text(
+              'Bambu RFID Reader',
+              style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700, color: Colors.white),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'Reads Bambu Lab filament spool Mifare Classic tags',
+              style: TextStyle(fontSize: 13, color: Colors.blueGrey[300]),
+              textAlign: TextAlign.center,
+            ),
+          ],
         ),
-        const SizedBox(height: 4),
-        Text(
-          'Reads Bambu Lab filament spool Mifare Classic tags',
-          style: TextStyle(fontSize: 13, color: Colors.blueGrey[300]),
-          textAlign: TextAlign.center,
+        Positioned(
+          right: 0,
+          top: 0,
+          child: IconButton(
+            onPressed: _openSettings,
+            icon: const Icon(Icons.settings, color: Color(0xFF64748B)),
+            tooltip: 'Settings',
+          ),
         ),
       ],
+    );
+  }
+
+  Widget _buildUploadCard(BambuFilament f) {
+    return _Card(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const Text('SPOOLMAN', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: Color(0xFF94A3B8), letterSpacing: 1)),
+          const SizedBox(height: 12),
+          ElevatedButton.icon(
+            onPressed: (_uploading || !_settings.isConfigured) ? null : _uploadToSpoolman,
+            icon: _uploading
+                ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                : const Icon(Icons.cloud_upload_outlined),
+            label: Text(_uploading ? 'Uploading…' : 'Upload to Spoolman'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF7C3AED),
+              foregroundColor: Colors.white,
+              disabledBackgroundColor: const Color(0xFF334155),
+              disabledForegroundColor: const Color(0xFF64748B),
+              padding: const EdgeInsets.symmetric(vertical: 14),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            ),
+          ),
+          if (!_settings.isConfigured) ...[  
+            const SizedBox(height: 8),
+            const Text(
+              'Configure Spoolman URL and Salt in Settings (⚙) first.',
+              style: TextStyle(color: Color(0xFF64748B), fontSize: 12),
+              textAlign: TextAlign.center,
+            ),
+          ],
+          if (_uploadStatus != null) ...[  
+            const SizedBox(height: 10),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              decoration: BoxDecoration(
+                color: _uploadOk ? const Color(0xFF14532D) : const Color(0xFF450A0A),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Text(
+                _uploadStatus!,
+                style: TextStyle(
+                  color: _uploadOk ? const Color(0xFF4ADE80) : const Color(0xFFF87171),
+                  fontSize: 13,
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
     );
   }
 
