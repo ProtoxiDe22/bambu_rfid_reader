@@ -1,6 +1,6 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
-import 'bambu_parser.dart';
+import 'generic_filament.dart';
 import 'filament_cache.dart';
 
 const _extraKeyTrayUid = 'tray_uid';
@@ -102,7 +102,7 @@ class SpoolmanClient {
     return null;
   }
 
-  Future<int> _resolveFilamentId(BambuFilament f) async {
+  Future<int> _resolveFilamentId(GenericFilament f) async {
     final colorHex = f.colors.isNotEmpty
         ? (f.colors.first & 0xFFFFFF)
             .toRadixString(16)
@@ -110,7 +110,7 @@ class SpoolmanClient {
             .toUpperCase()
         : null;
 
-    const manufacturer = 'Bambu Lab';
+    final manufacturer = f.manufacturer;
 
     List<ExternalFilament> catalog;
     try {
@@ -122,7 +122,7 @@ class SpoolmanClient {
     final match = catalog.isNotEmpty
         ? FilamentCache.findBestMatch(
             catalog: catalog,
-            material: f.filamentType,
+            material: f.type,
             diameterMm: f.diameterMm,
             colorHex: colorHex,
             manufacturer: manufacturer,
@@ -142,19 +142,22 @@ class SpoolmanClient {
       }
     }
 
-    final existingId = await _findExistingFilament(f.filamentType, colorHex);
+    final existingId = await _findExistingFilament(f.type, colorHex);
     if (existingId != null) return existingId;
 
     final vendorId = await _resolveVendorId(manufacturer);
+    final name = f.modifiers.isNotEmpty
+        ? '${f.type} ${f.modifiers.join(' ')}'
+        : f.type;
 
     final payload = <String, dynamic>{
-      'name': f.detailedType.isNotEmpty ? f.detailedType : f.filamentType,
-      'material': f.filamentType,
+      'name': name,
+      'material': f.type,
       'color_hex': colorHex,
       'diameter': double.parse(f.diameterMm.toStringAsFixed(2)),
       'density': 1.24,
-      'settings_extruder_temp': f.hotendMaxTemp,
-      'settings_bed_temp': f.bedTemp,
+      'settings_extruder_temp': f.hotendMaxTemp.round(),
+      'settings_bed_temp': f.bedTemp.round(),
       'vendor_id': vendorId,
     };
 
@@ -224,15 +227,16 @@ class SpoolmanClient {
     );
   }
 
-  Future<SpoolmanSpool> createSpool(BambuFilament f) async {
+  Future<SpoolmanSpool> createSpool(GenericFilament f) async {
     await _ensureTrayUidField();
     final filamentId = await _resolveFilamentId(f);
 
+    final uid = f.deduplicationUid;
     final spoolPayload = <String, dynamic>{
       'filament_id': filamentId,
-      if (f.weightGrams > 0) 'initial_weight': f.weightGrams.toDouble(),
-      if (f.weightGrams > 0) 'remaining_weight': f.weightGrams.toDouble(),
-      'extra': {_extraKeyTrayUid: jsonEncode(f.trayUidHex)},
+      if (f.weightGrams > 0) 'initial_weight': f.weightGrams,
+      if (f.weightGrams > 0) 'remaining_weight': f.weightGrams,
+      'extra': {_extraKeyTrayUid: jsonEncode(uid)},
     };
 
     final spoolResp = await _post(_uri('/api/v1/spool'), spoolPayload);

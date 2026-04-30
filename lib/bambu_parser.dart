@@ -1,4 +1,5 @@
 import 'dart:typed_data';
+import 'generic_filament.dart';
 
 // ─── Constants (mirrored from constants.py) ──────────────────────────────────
 
@@ -94,6 +95,25 @@ class BambuFilament {
   final int filamentLength;
   final String manufacturingDate;
   final String tagUid;
+
+  GenericFilament toGenericFilament() => GenericFilament(
+        sourceProcessor: 'bambu',
+        uniqueId: trayUidHex,
+        manufacturer: 'Bambu Lab',
+        type: filamentType,
+        modifiers: modifier.isNotEmpty && modifier != filamentType ? [modifier] : [],
+        colors: colors,
+        diameterMm: diameterMm,
+        weightGrams: weightGrams.toDouble(),
+        hotendMinTemp: hotendMinTemp.toDouble(),
+        hotendMaxTemp: hotendMaxTemp.toDouble(),
+        bedTemp: bedTemp.toDouble(),
+        dryingTemp: dryingTemp.toDouble(),
+        dryingTimeHours: dryingTime.toDouble(),
+        manufacturingDate: manufacturingDate,
+        tagUid: tagUid,
+        trayUid: trayUidHex,
+      );
 
   const BambuFilament({
     required this.filamentType,

@@ -1,5 +1,5 @@
-import 'dart:typed_data';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:nfc_manager/nfc_manager.dart';
 import 'package:nfc_manager/platform_tags.dart';
 import 'bambu_parser.dart';
@@ -7,6 +7,12 @@ import 'hkdf.dart';
 import 'settings.dart';
 import 'settings_page.dart';
 import 'spoolman.dart';
+import 'generic_filament.dart';
+import 'anycubic_parser.dart';
+import 'elegoo_parser.dart';
+import 'qidi_parser.dart';
+import 'openspool_parser.dart';
+import 'tigertag_parser.dart';
 
 void main() {
   runApp(const BambuRfidApp());
@@ -20,7 +26,7 @@ class BambuRfidApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Bambu RFID Reader',
+      title: 'OpenRFID Spool Reader',
       debugShowCheckedModeBanner: false,
       theme: ThemeData.dark().copyWith(
         scaffoldBackgroundColor: const Color(0xFF0F1117),
@@ -65,7 +71,7 @@ class ScanPage extends StatefulWidget {
 class _ScanPageState extends State<ScanPage> {
   bool _scanning = false;
   bool _nfcAvailable = false;
-  BambuFilament? _result;
+  GenericFilament? _result;
   final List<LogEntry> _logs = [];
   final ScrollController _logScroll = ScrollController();
   late AppSettings _settings;
@@ -90,6 +96,14 @@ class _ScanPageState extends State<ScanPage> {
   }
 
   void _log(String msg, [LogLevel level = LogLevel.info]) {
+    final prefix = {
+      LogLevel.info:  '[I]',
+      LogLevel.ok:    '[✓]',
+      LogLevel.warn:  '[W]',
+      LogLevel.error: '[!]',
+      LogLevel.data:  '[D]',
+    }[level] ?? '[I]';
+    debugPrint('$prefix $msg');
     setState(() => _logs.add(LogEntry.make(msg, level)));
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_logScroll.hasClients) {
@@ -139,46 +153,53 @@ class _ScanPageState extends State<ScanPage> {
     _log('Tag detected. Data keys: ${tag.data.keys.join(', ')}', LogLevel.ok);
 
     final mifare = MifareClassic.from(tag);
-    if (mifare == null) {
-      _log('Tag is not Mifare Classic. Cannot read Bambu spool.', LogLevel.error);
+    if (mifare != null) {
+      await _handleMifareClassic(mifare);
       return;
     }
 
+    final ultralight = MifareUltralight.from(tag);
+    if (ultralight != null) {
+      await _handleMifareUltralight(ultralight, tag);
+      return;
+    }
+
+    _log('Tag type not supported (not Mifare Classic or Ultralight).', LogLevel.error);
+  }
+
+  Future<void> _handleMifareClassic(MifareClassic mifare) async {
     final uidBytes = mifare.identifier;
     final uidHex = uidBytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join(':').toUpperCase();
-    _log('UID: $uidHex  Sectors: ${mifare.sectorCount}', LogLevel.ok);
+    _log('Mifare Classic — UID: $uidHex  Sectors: ${mifare.sectorCount}', LogLevel.ok);
 
-    List<Uint8List> derivedKeys;
-    try {
-      derivedKeys = deriveKeys(Uint8List.fromList(uidBytes), saltHex: _settings.saltHex);
-      _log('HKDF key derivation OK.', LogLevel.ok);
-    } catch (e) {
-      _log('HKDF failed: $e', LogLevel.error);
-      return;
+    List<Uint8List>? derivedKeys;
+    if (_settings.saltHex.isNotEmpty) {
+      try {
+        derivedKeys = deriveKeys(Uint8List.fromList(uidBytes), saltHex: _settings.saltHex);
+        _log('HKDF key derivation OK.', LogLevel.ok);
+      } catch (e) {
+        _log('HKDF failed: $e', LogLevel.warn);
+      }
     }
 
     final allData = Uint8List(1024);
     int successCount = 0;
-
-    // Mifare Classic 1K: 16 sectors × 4 blocks each.
-    // Sectors 0-15 each have 4 blocks; last block of each sector is the sector trailer.
-    // Block index = sector * 4 + block-within-sector.
     final sectorCount = mifare.sectorCount.clamp(0, 16);
 
     for (int sector = 0; sector < sectorCount; sector++) {
-      final key = derivedKeys[sector];
+      bool authed = false;
 
-      bool authed = await mifare.authenticateSectorWithKeyA(sectorIndex: sector, key: key);
-      if (authed) {
-        _log('  Sector $sector: auth OK (derived key A)', LogLevel.ok);
-      } else {
+      if (derivedKeys != null) {
+        authed = await mifare.authenticateSectorWithKeyA(sectorIndex: sector, key: derivedKeys[sector]);
+        if (authed) _log('  Sector $sector: auth OK (derived key A)', LogLevel.ok);
+      }
+
+      if (!authed) {
         authed = await mifare.authenticateSectorWithKeyA(
           sectorIndex: sector,
           key: Uint8List.fromList([0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]),
         );
-        if (authed) {
-          _log('  Sector $sector: auth OK (default key A)', LogLevel.warn);
-        }
+        if (authed) _log('  Sector $sector: auth OK (default key A)', LogLevel.warn);
       }
 
       if (!authed) {
@@ -186,7 +207,6 @@ class _ScanPageState extends State<ScanPage> {
         continue;
       }
 
-      // Read data blocks only (skip sector trailer = last block in sector)
       for (int b = 0; b < 3; b++) {
         final blockIndex = sector * 4 + b;
         try {
@@ -194,35 +214,156 @@ class _ScanPageState extends State<ScanPage> {
           final offset = blockIndex * 16;
           allData.setRange(offset, offset + blockData.length, blockData);
           successCount++;
-          _log(
-            '    Block $blockIndex: ${blockData.map((x) => x.toRadixString(16).padLeft(2, '0')).join(' ')}',
-            LogLevel.data,
-          );
+          _log('    Block $blockIndex: ${blockData.map((x) => x.toRadixString(16).padLeft(2, '0')).join(' ')}', LogLevel.data);
         } catch (e) {
           _log('    Block $blockIndex: read failed – $e', LogLevel.error);
         }
       }
     }
 
-    _log('Read $successCount blocks. Parsing…');
+    _log('Read $successCount blocks. Trying parsers…');
 
-    try {
-      final filament = parseBambuTag(allData, tagUid: uidHex);
-      setState(() {
-        _result = filament;
-        _uploadStatus = null;
-      });
-      _log('Parsed: ${filament.filamentType} / ${filament.detailedType} ${filament.weightGrams}g', LogLevel.ok);
-    } catch (e) {
-      _log('Parse error: $e', LogLevel.error);
+    GenericFilament? generic;
+
+    // Try Bambu
+    if (_settings.saltHex.isNotEmpty) {
+      try {
+        final bambu = parseBambuTag(allData, tagUid: uidHex);
+        generic = bambu.toGenericFilament();
+        _log('Parsed as Bambu: ${bambu.filamentType} / ${bambu.detailedType} ${bambu.weightGrams}g', LogLevel.ok);
+      } catch (_) {}
     }
+
+    // Try QIDI (default key, no salt needed)
+    generic ??= parseQidiTag(allData, tagUid: uidHex);
+    if (generic != null && generic.sourceProcessor == 'qidi') {
+      _log('Parsed as QIDI: ${generic.type} ${generic.manufacturer}', LogLevel.ok);
+    }
+
+    if (generic == null) {
+      _log('Could not identify tag format.', LogLevel.warn);
+    }
+
+    setState(() { _result = generic; _uploadStatus = null; });
+  }
+
+  // Safe deep-cast for maps arriving from platform channels as Map<Object?, Object?>
+  Map<String, dynamic>? _castMap(Object? raw) {
+    if (raw == null) return null;
+    if (raw is Map<String, dynamic>) return raw;
+    if (raw is Map) return raw.map((k, v) => MapEntry(k.toString(), v));
+    return null;
+  }
+
+  GenericFilament? _tryParseNdefMap(Map<String, dynamic> ndefMap, String tagUid) {
+    try {
+      final cachedMessage = _castMap(ndefMap['cachedMessage']);
+      final records = cachedMessage?['records'] as List<dynamic>?;
+      if (records == null || records.isEmpty) {
+        _log('[NDEF] No cached records in tag.data', LogLevel.data);
+        return null;
+      }
+      _log('[NDEF] ${records.length} pre-parsed record(s) from tag.data', LogLevel.data);
+
+      for (final rec in records) {
+        final r = _castMap(rec);
+        if (r == null) continue;
+        final tnf        = r['typeNameFormat'] as int? ?? 0;
+        final typeRaw    = r['type'];
+        final payloadRaw = r['payload'];
+        final typeBytes  = typeRaw is Uint8List ? typeRaw : (typeRaw is List ? Uint8List.fromList(typeRaw.cast<int>()) : Uint8List(0));
+        final payload    = payloadRaw is Uint8List ? payloadRaw : (payloadRaw is List ? Uint8List.fromList(payloadRaw.cast<int>()) : Uint8List(0));
+        final mimeType   = String.fromCharCodes(typeBytes);
+        _log('[NDEF] record TNF=$tnf mimeType="$mimeType" payloadLen=${payload.length}', LogLevel.data);
+
+        // TNF 2 = MIME, TNF 1 = Well-Known (some writers use text/plain)
+        if ((tnf == 2 || tnf == 1) && mimeType == 'application/json') {
+          final result = parseOpenspoolTag(
+            Uint8List(0), // unused — payload passed directly below
+            tagUid: tagUid,
+            log: (msg) => _log(msg, LogLevel.data),
+            preloadedPayload: payload,
+          );
+          if (result != null) return result;
+        }
+      }
+    } catch (e) {
+      _log('[NDEF] _tryParseNdefMap error: $e', LogLevel.error);
+    }
+    return null;
+  }
+
+  Future<void> _handleMifareUltralight(MifareUltralight ultralight, NfcTag tag) async {
+    final uidBytes = ultralight.identifier;
+    final uidHex = uidBytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join(':').toUpperCase();
+    _log('Mifare Ultralight — UID: $uidHex', LogLevel.ok);
+
+    // First try: use pre-parsed NDEF from tag.data (Android/iOS already reads it)
+    final ndefRaw = _castMap(tag.data['ndef']);
+    if (ndefRaw != null) {
+      _log('NDEF data present in tag — trying OpenSpool…');
+      final generic = _tryParseNdefMap(ndefRaw, uidHex);
+      if (generic != null) {
+        setState(() { _result = generic; _uploadStatus = null; });
+        return;
+      }
+      _log('NDEF present but not OpenSpool — falling back to raw page read.', LogLevel.warn);
+    }
+
+    // Fallback: readPages returns 16 bytes (4 pages) per call. Step by 4.
+    const totalPages = 45;
+    final allData = Uint8List(totalPages * 4);
+    int pagesRead = 0;
+    for (int page = 0; page < totalPages; page += 4) {
+      try {
+        final chunk = await ultralight.readPages(pageOffset: page);
+        final writeLen = chunk.length.clamp(0, allData.length - page * 4);
+        allData.setRange(page * 4, page * 4 + writeLen, chunk);
+        pagesRead += 4;
+      } catch (_) {
+        break;
+      }
+    }
+
+    if (pagesRead == 0) {
+      _log('Could not read any pages.', LogLevel.error);
+      return;
+    }
+
+    _log('Read $pagesRead pages (${pagesRead * 4} bytes). Trying parsers…');
+    _log('  Page dump (pages 0-15): ${allData.sublist(0, allData.length.clamp(0, 64)).map((b) => b.toRadixString(16).padLeft(2,"0")).join(" ")}', LogLevel.data);
+
+    GenericFilament? generic;
+
+    generic ??= parseAnycubicTag(allData, tagUid: uidHex);
+    if (generic != null) _log('Parsed as Anycubic: ${generic.displayType}', LogLevel.ok);
+
+    generic ??= parseElegooTag(allData, tagUid: uidHex);
+    if (generic != null && generic.sourceProcessor == 'elegoo') _log('Parsed as Elegoo: ${generic.displayType}', LogLevel.ok);
+
+    generic ??= parseOpenspoolTag(allData, tagUid: uidHex, log: (msg) => _log(msg, LogLevel.data));
+    if (generic != null && generic.sourceProcessor == 'openspool') _log('Parsed as OpenSpool: ${generic.displayType}', LogLevel.ok);
+
+    if (generic == null) {
+      final tiger = await parseTigerTagAsync(allData, tagUid: uidHex);
+      if (tiger != null) {
+        generic = tiger;
+        _log('Parsed as TigerTag: ${generic.displayType} — ${generic.manufacturer}', LogLevel.ok);
+      }
+    }
+
+    if (generic == null) {
+      _log('Could not identify Ultralight tag format.', LogLevel.warn);
+    }
+
+    setState(() { _result = generic; _uploadStatus = null; });
   }
 
   Future<void> _uploadToSpoolman() async {
     final f = _result;
     if (f == null) return;
     if (!_settings.isConfigured) {
-      setState(() { _uploadStatus = 'Configure Spoolman URL and Salt in Settings first.'; _uploadOk = false; });
+      setState(() { _uploadStatus = 'Configure Spoolman URL in Settings first.'; _uploadOk = false; });
       return;
     }
 
@@ -230,7 +371,7 @@ class _ScanPageState extends State<ScanPage> {
     final client = SpoolmanClient(_settings.baseUrl);
 
     try {
-      final existing = await client.findByTrayUid(f.trayUidHex);
+      final existing = await client.findByTrayUid(f.deduplicationUid);
 
       if (existing != null) {
         setState(() {
@@ -302,12 +443,12 @@ class _ScanPageState extends State<ScanPage> {
             const Text('🧵', style: TextStyle(fontSize: 40)),
             const SizedBox(height: 8),
             const Text(
-              'Bambu RFID Reader',
+              'OpenRFID Spool Reader',
               style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700, color: Colors.white),
             ),
             const SizedBox(height: 4),
             Text(
-              'Reads Bambu Lab filament spool Mifare Classic tags',
+              'Supports Bambu, Anycubic, Elegoo, QIDI, Snapmaker, OpenSpool & TigerTag',
               style: TextStyle(fontSize: 13, color: Colors.blueGrey[300]),
               textAlign: TextAlign.center,
             ),
@@ -326,7 +467,7 @@ class _ScanPageState extends State<ScanPage> {
     );
   }
 
-  Widget _buildUploadCard(BambuFilament f) {
+  Widget _buildUploadCard(GenericFilament f) {
     return _Card(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -351,7 +492,7 @@ class _ScanPageState extends State<ScanPage> {
           if (!_settings.isConfigured) ...[  
             const SizedBox(height: 8),
             const Text(
-              'Configure Spoolman URL and Salt in Settings (⚙) first.',
+              'Configure Spoolman URL in Settings (⚙) first.',
               style: TextStyle(color: Color(0xFF64748B), fontSize: 12),
               textAlign: TextAlign.center,
             ),
@@ -386,7 +527,7 @@ class _ScanPageState extends State<ScanPage> {
           ElevatedButton.icon(
             onPressed: _nfcAvailable ? (_scanning ? _stopScan : _startScan) : null,
             icon: Icon(_scanning ? Icons.stop : Icons.nfc),
-            label: Text(_scanning ? 'Stop Scanning' : 'Scan Tag'),
+            label: Text(_scanning ? 'Stop Scanning' : 'Scan Spool Tag'),
             style: ElevatedButton.styleFrom(
               backgroundColor: _scanning ? const Color(0xFFEF4444) : const Color(0xFF3B82F6),
               foregroundColor: Colors.white,
@@ -418,15 +559,41 @@ class _ScanPageState extends State<ScanPage> {
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               const Text('DEBUG LOG', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: Color(0xFF94A3B8), letterSpacing: 1)),
-              TextButton(
-                onPressed: () => setState(() => _logs.clear()),
-                style: TextButton.styleFrom(
-                  foregroundColor: const Color(0xFF64748B),
-                  padding: EdgeInsets.zero,
-                  minimumSize: const Size(40, 24),
-                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                ),
-                child: const Text('clear', style: TextStyle(fontSize: 12)),
+              Row(
+                children: [
+                  TextButton(
+                    onPressed: _logs.isEmpty ? null : () {
+                      final text = _logs
+                          .map((e) => '${e.timestamp}  ${e.message}')
+                          .join('\n');
+                      Clipboard.setData(ClipboardData(text: text));
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('Log copied to clipboard'),
+                          duration: Duration(seconds: 2),
+                        ),
+                      );
+                    },
+                    style: TextButton.styleFrom(
+                      foregroundColor: const Color(0xFF64748B),
+                      padding: EdgeInsets.zero,
+                      minimumSize: const Size(40, 24),
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    ),
+                    child: const Text('copy', style: TextStyle(fontSize: 12)),
+                  ),
+                  const SizedBox(width: 8),
+                  TextButton(
+                    onPressed: () => setState(() => _logs.clear()),
+                    style: TextButton.styleFrom(
+                      foregroundColor: const Color(0xFF64748B),
+                      padding: EdgeInsets.zero,
+                      minimumSize: const Size(40, 24),
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    ),
+                    child: const Text('clear', style: TextStyle(fontSize: 12)),
+                  ),
+                ],
               ),
             ],
           ),
@@ -466,7 +633,7 @@ class _ScanPageState extends State<ScanPage> {
     );
   }
 
-  Widget _buildResultCard(BambuFilament f) {
+  Widget _buildResultCard(GenericFilament f) {
     return _Card(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -521,13 +688,13 @@ class _StatusBar extends StatelessWidget {
       text = 'NFC not available on this device.';
     } else if (scanning) {
       bg = const Color(0xFF1E3A5F); fg = const Color(0xFF60A5FA);
-      text = 'Scanning… hold a Bambu spool near your device.';
+      text = 'Scanning… hold a spool near your device.';
     } else if (hasResult) {
       bg = const Color(0xFF14532D); fg = const Color(0xFF4ADE80);
       text = '✓ Tag parsed successfully.';
     } else {
       bg = const Color(0xFF1E293B); fg = const Color(0xFF64748B);
-      text = 'Ready – tap Scan Tag then hold a spool near your device.';
+      text = 'Ready – tap Scan Spool Tag and hold a spool near your device.';
     }
 
     return Container(
@@ -541,30 +708,26 @@ class _StatusBar extends StatelessWidget {
 // ─── Result table ────────────────────────────────────────────────────────────
 
 class _ResultTable extends StatelessWidget {
-  final BambuFilament filament;
+  final GenericFilament filament;
   const _ResultTable({required this.filament});
 
   @override
   Widget build(BuildContext context) {
     final f = filament;
     final rows = [
-      ['Filament Type',   f.filamentType],
-      ['Detailed Type',   f.detailedType.isEmpty ? '—' : f.detailedType],
-      ['Modifier',        f.modifier.isEmpty ? '—' : f.modifier],
-      ['Material Variant',f.materialVariant.isEmpty ? '—' : f.materialVariant],
-      ['Material ID',     f.materialId.isEmpty ? '—' : f.materialId],
-      ['Diameter',        '${f.diameterMm.toStringAsFixed(2)} mm'],
-      ['Weight',          '${f.weightGrams} g'],
-      ['Filament Length', f.filamentLength > 0 ? '${f.filamentLength} m' : '—'],
-      ['Hotend Temp',     '${f.hotendMinTemp} – ${f.hotendMaxTemp} °C'],
-      ['Bed Temp',        '${f.bedTemp} °C'],
-      ['Drying Temp',     '${f.dryingTemp} °C'],
-      ['Drying Time',     '${f.dryingTime} h'],
-      ['Nozzle Diameter', f.nozzleDiameter > 0 ? '${f.nozzleDiameter.toStringAsFixed(2)} mm' : '—'],
-      ['Spool Width',     f.spoolWidth > 0 ? '${f.spoolWidth} mm' : '—'],
-      ['Manufacturing',   f.manufacturingDate],
-      ['Tray UID',        f.trayUidHex],
-      ['Tag UID',         f.tagUid.isEmpty ? '—' : f.tagUid],
+      ['Source',        f.sourceProcessor.toUpperCase()],
+      ['Manufacturer',  f.manufacturer.isEmpty ? '—' : f.manufacturer],
+      ['Type',          f.type],
+      ['Modifiers',     f.modifiers.isEmpty ? '—' : f.modifiers.join(', ')],
+      ['Diameter',      '${f.diameterMm.toStringAsFixed(2)} mm'],
+      ['Weight',        '${f.weightGrams.toStringAsFixed(0)} g'],
+      ['Hotend Temp',   f.hotendMaxTemp > 0 ? '${f.hotendMinTemp.toStringAsFixed(0)} – ${f.hotendMaxTemp.toStringAsFixed(0)} °C' : '—'],
+      ['Bed Temp',      f.bedTemp > 0 ? '${f.bedTemp.toStringAsFixed(0)} °C' : '—'],
+      ['Drying Temp',   f.dryingTemp > 0 ? '${f.dryingTemp.toStringAsFixed(0)} °C' : '—'],
+      ['Drying Time',   f.dryingTimeHours > 0 ? '${f.dryingTimeHours.toStringAsFixed(0)} h' : '—'],
+      ['Manufacturing', f.manufacturingDate],
+      ['UID',           f.deduplicationUid.isEmpty ? '—' : f.deduplicationUid],
+      ['Tag UID',       f.tagUid.isEmpty ? '—' : f.tagUid],
     ];
 
     return Table(
