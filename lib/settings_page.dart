@@ -12,7 +12,8 @@ class SettingsPage extends StatefulWidget {
 
 class _SettingsPageState extends State<SettingsPage> {
   late final TextEditingController _urlCtrl;
-  late final TextEditingController _saltCtrl;
+  late final TextEditingController _bambuSaltCtrl;
+  late final TextEditingController _smSaltCtrl;
   bool _saving = false;
   bool _testing = false;
   String? _testResult;
@@ -24,20 +25,23 @@ class _SettingsPageState extends State<SettingsPage> {
   void initState() {
     super.initState();
     _urlCtrl = TextEditingController(text: widget.settings.spoolmanUrl);
-    _saltCtrl = TextEditingController(text: widget.settings.saltHex);
+    _bambuSaltCtrl = TextEditingController(text: widget.settings.bambuSaltHex);
+    _smSaltCtrl = TextEditingController(text: widget.settings.snapmakerSaltHex);
   }
 
   @override
   void dispose() {
     _urlCtrl.dispose();
-    _saltCtrl.dispose();
+    _bambuSaltCtrl.dispose();
+    _smSaltCtrl.dispose();
     super.dispose();
   }
 
   Future<void> _save() async {
     setState(() => _saving = true);
     widget.settings.spoolmanUrl = _urlCtrl.text.trim();
-    widget.settings.saltHex = _saltCtrl.text.trim();
+    widget.settings.bambuSaltHex = _bambuSaltCtrl.text.trim();
+    widget.settings.snapmakerSaltHex = _smSaltCtrl.text.trim();
     await widget.settings.save();
     setState(() => _saving = false);
     if (mounted) {
@@ -106,10 +110,22 @@ class _SettingsPageState extends State<SettingsPage> {
           const SizedBox(height: 8),
           _settingsCard(
             child: _field(
-              controller: _saltCtrl,
-              label: 'Salt Hex (RFID Key)',
-              hint: 'You have to get this yourself',
-              helper: 'The HKDF salt used to derive Mifare Classic sector keys.',
+              controller: _bambuSaltCtrl,
+              label: 'Bambu Salt Hex',
+              hint: 'Bambu HKDF salt',
+              helper: 'The HKDF salt used to derive Bambu Mifare Classic sector keys.',
+              obscure: true,
+            ),
+          ),
+          const SizedBox(height: 16),
+          _sectionLabel('SNAPMAKER RFID'),
+          const SizedBox(height: 8),
+          _settingsCard(
+            child: _field(
+              controller: _smSaltCtrl,
+              label: 'Snapmaker Salt Hex',
+              hint: 'Snapmaker HKDF salt',
+              helper: 'The HKDF salt used to derive Snapmaker Mifare Classic sector keys.',
               obscure: true,
             ),
           ),

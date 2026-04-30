@@ -36,6 +36,7 @@ dependencies:
   cupertino_icons: ^1.0.8
   nfc_manager: ^3.3.0
   crypto: ^3.0.3
+  pointycastle: ^3.9.1
   http: ^1.2.0
   shared_preferences: ^2.3.0
 

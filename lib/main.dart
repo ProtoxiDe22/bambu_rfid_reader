@@ -13,6 +13,7 @@ import 'elegoo_parser.dart';
 import 'qidi_parser.dart';
 import 'openspool_parser.dart';
 import 'tigertag_parser.dart';
+import 'snapmaker_parser.dart';
 
 void main() {
   runApp(const BambuRfidApp());
@@ -172,34 +173,72 @@ class _ScanPageState extends State<ScanPage> {
     final uidHex = uidBytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join(':').toUpperCase();
     _log('Mifare Classic — UID: $uidHex  Sectors: ${mifare.sectorCount}', LogLevel.ok);
 
-    List<Uint8List>? derivedKeys;
-    if (_settings.saltHex.isNotEmpty) {
+    List<Uint8List>? bambuKeysA;
+    if (_settings.bambuSaltHex.isNotEmpty) {
       try {
-        derivedKeys = deriveKeys(Uint8List.fromList(uidBytes), saltHex: _settings.saltHex);
-        _log('HKDF key derivation OK.', LogLevel.ok);
+        bambuKeysA = deriveKeys(Uint8List.fromList(uidBytes), saltHex: _settings.bambuSaltHex);
+        _log('HKDF key derivation OK (Bambu).', LogLevel.ok);
       } catch (e) {
-        _log('HKDF failed: $e', LogLevel.warn);
+        _log('Bambu HKDF failed: $e', LogLevel.warn);
+      }
+    }
+
+    List<Uint8List>? smKeysA;
+    List<Uint8List>? smKeysB;
+    if (_settings.snapmakerSaltHex.isNotEmpty) {
+      try {
+        final smKeys = snapmakerDeriveKeys(
+            Uint8List.fromList(uidBytes.take(4).toList()),
+            _settings.snapmakerSaltHex);
+        smKeysA = smKeys[0];
+        smKeysB = smKeys[1];
+        _log('HKDF key derivation OK (Snapmaker).', LogLevel.ok);
+      } catch (e) {
+        _log('Snapmaker HKDF failed: $e', LogLevel.warn);
       }
     }
 
     final allData = Uint8List(1024);
     int successCount = 0;
+    int bambuAuthCount = 0;
+    int snapmakerAuthCount = 0;
     final sectorCount = mifare.sectorCount.clamp(0, 16);
 
     for (int sector = 0; sector < sectorCount; sector++) {
       bool authed = false;
 
-      if (derivedKeys != null) {
-        authed = await mifare.authenticateSectorWithKeyA(sectorIndex: sector, key: derivedKeys[sector]);
-        if (authed) _log('  Sector $sector: auth OK (derived key A)', LogLevel.ok);
+      // Try Bambu-derived key A
+      if (!authed && bambuKeysA != null) {
+        try {
+          authed = await mifare.authenticateSectorWithKeyA(sectorIndex: sector, key: bambuKeysA[sector]);
+          if (authed) { _log('  Sector $sector: auth OK (Bambu key A)', LogLevel.ok); bambuAuthCount++; }
+        } catch (_) {}
+      }
+
+      // Try Snapmaker-derived key A
+      if (!authed && smKeysA != null) {
+        try {
+          authed = await mifare.authenticateSectorWithKeyA(sectorIndex: sector, key: smKeysA[sector]);
+          if (authed) { _log('  Sector $sector: auth OK (Snapmaker key A)', LogLevel.ok); snapmakerAuthCount++; }
+        } catch (_) {}
+      }
+
+      // Try Snapmaker-derived key B
+      if (!authed && smKeysB != null) {
+        try {
+          authed = await mifare.authenticateSectorWithKeyB(sectorIndex: sector, key: smKeysB[sector]);
+          if (authed) { _log('  Sector $sector: auth OK (Snapmaker key B)', LogLevel.ok); snapmakerAuthCount++; }
+        } catch (_) {}
       }
 
       if (!authed) {
-        authed = await mifare.authenticateSectorWithKeyA(
-          sectorIndex: sector,
-          key: Uint8List.fromList([0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]),
-        );
-        if (authed) _log('  Sector $sector: auth OK (default key A)', LogLevel.warn);
+        try {
+          authed = await mifare.authenticateSectorWithKeyA(
+            sectorIndex: sector,
+            key: Uint8List.fromList([0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]),
+          );
+          if (authed) _log('  Sector $sector: auth OK (default key A)', LogLevel.warn);
+        } catch (_) {}
       }
 
       if (!authed) {
@@ -207,7 +246,7 @@ class _ScanPageState extends State<ScanPage> {
         continue;
       }
 
-      for (int b = 0; b < 3; b++) {
+      for (int b = 0; b < 4; b++) {
         final blockIndex = sector * 4 + b;
         try {
           final blockData = await mifare.readBlock(blockIndex: blockIndex);
@@ -221,17 +260,33 @@ class _ScanPageState extends State<ScanPage> {
       }
     }
 
-    _log('Read $successCount blocks. Trying parsers…');
+    final likelySnapmaker = snapmakerAuthCount > bambuAuthCount;
+    _log('Read $successCount blocks. Trying parsers… (${likelySnapmaker ? 'Snapmaker' : 'Bambu'} key dominated)');
 
     GenericFilament? generic;
 
-    // Try Bambu
-    if (_settings.saltHex.isNotEmpty) {
+    if (likelySnapmaker) {
+      generic = parseSnapmakerTag(allData, tagUid: uidHex, keysA: smKeysA, keysB: smKeysB);
+      if (generic != null) {
+        _log('Parsed as Snapmaker: ${generic.displayType} — ${generic.manufacturer}', LogLevel.ok);
+      }
+    }
+
+    // Try Bambu (skip if Snapmaker already matched)
+    if (generic == null && !likelySnapmaker) {
       try {
         final bambu = parseBambuTag(allData, tagUid: uidHex);
-        generic = bambu.toGenericFilament();
-        _log('Parsed as Bambu: ${bambu.filamentType} / ${bambu.detailedType} ${bambu.weightGrams}g', LogLevel.ok);
+        if (bambu.filamentType.isNotEmpty) {
+          generic = bambu.toGenericFilament();
+          _log('Parsed as Bambu: ${bambu.filamentType} / ${bambu.detailedType} ${bambu.weightGrams}g', LogLevel.ok);
+        }
       } catch (_) {}
+    }
+
+    // Snapmaker fallback (if Bambu keys dominated but Bambu parse failed)
+    generic ??= parseSnapmakerTag(allData, tagUid: uidHex, keysA: smKeysA, keysB: smKeysB);
+    if (generic != null && generic.sourceProcessor == 'snapmaker') {
+      _log('Parsed as Snapmaker: ${generic.displayType} — ${generic.manufacturer}', LogLevel.ok);
     }
 
     // Try QIDI (default key, no salt needed)
