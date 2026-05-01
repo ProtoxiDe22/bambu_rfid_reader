@@ -24,6 +24,9 @@ const _kDryTimePos      = 2*64 + 1*16 + 2;
 const _kHotMaxPos       = 2*64 + 1*16 + 4;
 const _kHotMinPos       = 2*64 + 1*16 + 6;
 const _kBedTempPos      = 2*64 + 1*16 + 10;
+const _kSkuPos          = 1*64 + 2*16 + 0;
+const _kLengthPos       = 2*64 + 0*16 + 4;
+const _kMfgDatePos      = 2*64 + 2*16 + 0;   const _kMfgDateLen      = 8;
 const _kRsaVerPos       = 2*64 + 2*16 + 8;
 
 const _kMainTypes = <int, String>{
@@ -174,6 +177,9 @@ GenericFilament? parseSnapmakerTag(Uint8List data, {
   ];
   if (colors.isEmpty) colors.add((alpha << 24) | readRgb(_kRgb1Pos));
 
+  final sku        = _readU32LE(data, _kSkuPos);
+  final length     = _readU16LE(data, _kLengthPos);
+  final mfgDate    = _readAscii(data, _kMfgDatePos, _kMfgDateLen);
   final diameter   = _readU16LE(data, _kDiameterPos) / 100.0;
   final weight     = _readU16LE(data, _kWeightPos).toDouble();
   final dryTemp    = _readU16LE(data, _kDryTempPos).toDouble();
@@ -184,7 +190,7 @@ GenericFilament? parseSnapmakerTag(Uint8List data, {
 
   return GenericFilament(
     sourceProcessor: 'snapmaker',
-    uniqueId: 'snapmaker:$vendor:$mainType:$subType:${colors.first.toRadixString(16)}',
+    uniqueId: 'snapmaker:$vendor:$mainType:$subType:${colors.first.toRadixString(16)}:$sku:${length}m:$mfgDate',
     manufacturer: vendor,
     type: mainType,
     modifiers: [subType],
@@ -196,7 +202,7 @@ GenericFilament? parseSnapmakerTag(Uint8List data, {
     bedTemp: bed,
     dryingTemp: dryTemp,
     dryingTimeHours: dryTime,
-    manufacturingDate: '',
+    manufacturingDate: mfgDate,
     tagUid: tagUid,
   );
 }
@@ -335,7 +341,10 @@ List<Uint8List> _hkdfKeys(Uint8List ikm, Uint8List salt, String keyType) {
 // Helpers
 // ---------------------------------------------------------------------------
 
+// Numeric fields: little-endian (Python reversed=True slice then big-endian int = LE)
 int _readU16LE(Uint8List d, int pos) => d[pos] | (d[pos + 1] << 8);
+int _readU32LE(Uint8List d, int pos) =>
+    d[pos] | (d[pos + 1] << 8) | (d[pos + 2] << 16) | (d[pos + 3] << 24);
 
 String _readAscii(Uint8List d, int pos, int len) =>
     String.fromCharCodes(d.sublist(pos, pos + len).takeWhile((b) => b != 0));

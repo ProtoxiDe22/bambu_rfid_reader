@@ -45,5 +45,5 @@ class GenericFilament {
     return (colors.first & 0xFFFFFF).toRadixString(16).padLeft(6, '0').toUpperCase();
   }
 
-  String get deduplicationUid => trayUid ?? tagUid;
+  String get deduplicationUid => trayUid ?? (sourceProcessor == 'snapmaker' ? uniqueId : tagUid);
 }
